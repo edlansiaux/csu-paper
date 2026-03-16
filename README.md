@@ -29,7 +29,6 @@ This repository reproduces all tables and figures from the manuscript. It implem
 
 ```
 csu-paper/
-├── manuscript.tex              # LaTeX source (arXiv-ready)
 ├── src/
 │   ├── models/
 │   │   ├── svj.py              # SVJ process simulation (Full Truncation)
