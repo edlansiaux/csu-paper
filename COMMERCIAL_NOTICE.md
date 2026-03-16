@@ -51,8 +51,7 @@ calibration.
 For commercial licensing of the production components, contact:
 
 **Dr. Édouard Lansiaux**
-ShortSafe / STaR-AI Research Group, CHU de Lille
-edouard.lansiaux@univ-lille.fr
+edouard.lansiaux@orange.fr
 
 ---
 
