@@ -182,7 +182,7 @@ calibration) are maintained in a private repository.
 
 See [COMMERCIAL_NOTICE.md](COMMERCIAL_NOTICE.md) and [LICENSE](LICENSE) for details.
 
-For commercial licensing: edouard.lansiaux@univ-lille.fr
+For commercial licensing: edouard.lansiaux@orange.fr
 
 ## Related Work
 
