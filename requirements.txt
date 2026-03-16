@@ -1,0 +1,11 @@
+numpy>=1.24
+scipy>=1.11
+matplotlib>=3.7
+pandas>=2.0
+
+# Optional: production EGARCH estimation
+# arch>=6.0
+
+# Optional: LSTM training
+# torch>=2.0
+# torchvision>=0.15

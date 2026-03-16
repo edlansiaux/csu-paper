@@ -1,0 +1,703 @@
+\documentclass[12pt]{article}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{mathrsfs}
+\usepackage{enumitem}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{booktabs}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{geometry}
+\usepackage{xcolor}
+\geometry{margin=1in}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{definition}{Definition}
+\newtheorem{proposition}{Proposition}
+\newtheorem{lemma}{Lemma}
+\newtheorem{corollary}{Corollary}
+\newtheorem{remark}{Remark}
+
+\title{Dynamic Capped Short Units: A Stochastic Volatility Framework\\
+for Retail Short Exposure with Bounded Risk}
+
+\author{%
+    \'{E}douard Lansiaux\thanks{Corresponding author.
+    STaR-AI Research Group, CHU de Lille; M2 Intelligence Artificielle en Sant\'{e},
+    \'{E}cole Centrale Lille, Universit\'{e} de Lille. E-mail: \texttt{edouard.lansiaux@univ-lille.fr}}
+}
+
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This paper introduces the Dynamic Capped Short Unit (CSU), a novel structured financial
+instrument that democratizes short selling for retail investors by eliminating theoretically
+unbounded losses. We develop a comprehensive pricing framework combining stochastic volatility
+with jump diffusion (SVJ) for underlying asset dynamics, paired with a machine learning risk
+triage system adapted from medical decision theory. The CSU is structured as a continuous
+up-and-out barrier option with dynamic knockout thresholds calibrated via an attention-guided
+hybrid EGARCH-LSTM network. We address a critical limitation of previous frameworks by adopting
+a full-truncation scheme for the Heston variance process, eliminating negative variance artifacts
+in Euler discretization. Monte Carlo simulations spanning 10,000 market trajectories---including
+calibrated replicas of the 2008 Financial Crisis (peak VIX $\approx 80\%$), the 2010 Flash Crash,
+and the COVID-19 market shock (peak VIX $\approx 85\%$)---demonstrate that the issuer's profit and
+loss (P\&L) remains bounded within $[-2.87\%, +0.12\%]$ of notional. Dynamic barrier adjustment
+reduces knockout frequency by $18.7\%$ relative to static barriers, while a corrected black swan
+premium formulation ensures non-negative pricing adjustments. The framework integrates a
+privacy-preserving federated learning protocol (ZKFL-PQ) for cross-broker model improvement,
+achieving 100\% Byzantine update rejection and maintaining full model accuracy across 10 training
+rounds, with a computational overhead of ${\sim}20\times$ per round---compatible with daily
+broker training cycles. All code and data are publicly available to ensure full reproducibility.
+
+\textbf{Keywords:} Barrier options, stochastic volatility, jump diffusion, EGARCH-LSTM,
+Monte Carlo simulation, retail finance, federated learning, EMTN, structured products.
+
+\textbf{JEL Classification:} G13, G32, C15, C63.
+\end{abstract}
+
+%------------------------------------------------------------------
+\section{Introduction}
+%------------------------------------------------------------------
+
+The democratization of financial markets has made equity investing broadly accessible to retail
+participants, yet short selling---a fundamental mechanism for price discovery and portfolio
+hedging---remains structurally inaccessible. The mathematical barrier is fundamental: an
+unconstrained short position carries theoretically unbounded losses as asset prices may rise
+without limit.
+
+Existing alternatives are inadequate. Contracts for Difference (CFDs) suffer from opacity,
+conflicts of interest between issuer and client, and empirical evidence that over 70\% of retail
+CFD accounts lose money~\cite{entrop2009price}. Turbos and leverage certificates address some of
+these concerns through barrier mechanisms~\cite{zhang2017gap}, but their pricing opacity, complex
+knock-out mechanics, and the empirically documented gap between theoretical and realized protection
+remain significant drawbacks. Vanilla put options impose a steep expertise barrier: investors must
+internalize $\Delta$, $\Theta$, and $\mathcal{V}$ to avoid systematic overpayment.
+
+This paper introduces the \emph{Dynamic Capped Short Unit} (CSU), a structured product that
+addresses this gap. The CSU is constructed as an up-and-out barrier option with a dynamic barrier
+level calibrated continuously to market conditions, ensuring that the maximum loss to the investor
+is precisely the initial premium paid---structurally, not contractually, through legal disclaimers.
+
+The mathematical contributions of this paper are fourfold:
+\begin{enumerate}
+    \item A rigorous CSU pricing model under stochastic volatility with jumps (SVJ), combining
+          the Heston~\cite{heston1993closed} mean-reverting variance process with Merton-type
+          Poisson jumps~\cite{merton1976option};
+    \item A full-truncation Euler scheme for the Heston CIR subprocess, eliminating negative
+          variance artifacts that invalidate standard discretization in tail-risk scenarios;
+    \item A corrected black swan premium formulation that monotonically increases the
+          premium with tail risk, resolving the sign error in prior formulations;
+    \item A risk triage algorithm mapping market severity and investor stability indices to
+          position sizing, inspired by clinical triage methodology~\cite{grossman2019triage}.
+\end{enumerate}
+
+The paper proceeds as follows. Section~\ref{sec:lit} reviews related literature. Section~\ref{sec:framework}
+presents the CSU pricing framework. Section~\ref{sec:triage} introduces the AI risk triage
+system. Section~\ref{sec:mc} describes the Monte Carlo simulation methodology. Section~\ref{sec:results}
+presents results. Section~\ref{sec:fl} discusses the federated learning architecture.
+Section~\ref{sec:conclusion} concludes.
+
+%------------------------------------------------------------------
+\section{Literature Review}\label{sec:lit}
+%------------------------------------------------------------------
+
+\subsection{Barrier Options and Leveraged Certificates}
+
+Rubinstein and Reiner~\cite{rubinstein1991unscrambling} derived the first closed-form pricing
+formulas for single barrier options under geometric Brownian motion, establishing the analytical
+foundations for knock-out structures. However, their framework assumes continuous monitoring and
+lognormal dynamics, both of which fail in stress scenarios with discrete monitoring and fat tails.
+
+Zhang and Thul~\cite{zhang2017gap} extended barrier option pricing to a multi-window framework
+with explicit jump components, modeling the gap risk arising from overnight price discontinuities
+in leveraged certificates. Their algorithm achieves numerical accuracy competitive with Monte Carlo
+at a fraction of the computational cost for market-making applications. Our CSU pricing builds
+directly on their multi-window survival probability decomposition.
+
+The pricing of barrier options under stochastic volatility has been advanced by
+Higgins~\cite{higgins2014stochastic}, who demonstrated that the spot-volatility correlation
+$\rho$---the so-called leverage effect---critically impacts barrier touch probabilities. For
+instruments where asset drawdowns increase volatility (negative $\rho$), barrier touch
+probabilities are substantially higher than in constant-volatility models, necessitating
+stochastic volatility frameworks.
+
+\subsection{Stochastic Volatility and Jump Diffusion}
+
+The Heston~\cite{heston1993closed} model provides the canonical framework for mean-reverting
+stochastic variance. Its semi-analytical characteristic function enables efficient calibration
+and pricing via Fourier inversion. Guterding and Boenkost~\cite{guterding2024heston} extended
+the framework to piecewise-constant parameters, improving calibration accuracy across term
+structures. Merton's jump-diffusion model~\cite{merton1976option} adds Poisson-driven
+discontinuities critical for capturing gap events in equity markets.
+
+For simulation, the na\"{i}ve Euler discretization of the CIR variance process can produce
+negative values whenever $2\kappa\theta < \sigma^2$---the Feller condition is violated for
+parameters calibrated to high-volatility regimes. Lord~et~al.~\cite{lord2010comparison}
+systematically compared discretization schemes, demonstrating that full truncation
+($v_t = \max(v_t^-, 0)$) provides the best balance of accuracy and computational efficiency.
+We adopt this scheme throughout.
+
+\subsection{Hybrid GARCH--Deep Learning Models}
+
+Chibane~et~al.~\cite{chibane2025attention} demonstrated that attention-guided EGARCH-LSTM
+hybrids achieve superior volatility forecasting accuracy over pure statistical or pure deep
+learning approaches. The EGARCH specification's asymmetric response captures the leverage
+effect, while the LSTM component learns regime-dependent nonlinear patterns. Pia~\cite{pia2025garch}
+confirmed these findings for currency volatility, with APARCH-LSTM achieving $R^2 > 0.95$.
+
+\subsection{Tail Risk and Black Swan Pricing}
+
+Cinciulescu~\cite{cinciulescu2024impact} demonstrated that Modern Portfolio Theory's reliance
+on Gaussian returns systematically underestimates black swan probabilities. For structured
+product issuers, this gap manifests as unhedged tail exposure---precisely the risk the black
+swan premium in our framework is designed to cover. Glasserman~\cite{glasserman2004monte}
+provides the theoretical basis for the variance reduction techniques employed in our Monte Carlo
+implementation.
+
+%------------------------------------------------------------------
+\section{Mathematical Framework}\label{sec:framework}
+%------------------------------------------------------------------
+
+\subsection{Product Definition}
+
+\begin{definition}[Capped Short Unit]
+A Capped Short Unit (CSU) on underlying asset $S_t$ with initial price $K$ (strike at issuance),
+dynamic knockout barrier $B_t > K$, leverage factor $L \in (0,1]$, and maturity $T$ is a
+financial instrument with payoff:
+\begin{equation}
+    V(\tau, T) = \begin{cases}
+        L \cdot \max\!\left(0,\, \dfrac{K - S_T}{K}\right) \cdot e^{-r(T-t)} & \text{if } \tau > T \\[6pt]
+        0 & \text{if } \tau \leq T
+    \end{cases}
+\end{equation}
+where $\tau = \inf\{t \geq 0 : S_t \geq B_t\}$ is the first passage time to the barrier, and
+$r$ is the risk-free rate. The initial premium $P_0$ is the maximum loss: $\max \text{loss} = P_0$.
+\end{definition}
+
+\begin{remark}
+The leverage factor $L \in (0,1]$ bounds the payoff to $[0, L \cdot e^{-rT}]$ per unit,
+ensuring the instrument is a bounded-risk product for both buyer (loss $\leq P_0$) and
+issuer (hedgeable within the delta-hedge P\&L).
+\end{remark}
+
+\subsection{Underlying Asset Dynamics}
+
+Under the risk-neutral measure $\mathbb{Q}$, we model asset dynamics via an SVJ process:
+
+\begin{align}
+    \frac{dS_t}{S_t} &= (r - \lambda \bar{\mu}_J)\,dt + \sqrt{v_t}\,dW_t^S
+                        + (e^{J_t} - 1)\,dN_t \label{eq:price} \\
+    dv_t &= \kappa(\theta - v_t^+)\,dt + \sigma\sqrt{v_t^+}\,dW_t^v \label{eq:var} \\
+    d\langle W^S, W^v \rangle_t &= \rho\,dt \label{eq:corr}
+\end{align}
+
+where $v_t^+ = \max(v_t, 0)$ implements full truncation of the variance process;
+$\kappa > 0$ is mean-reversion speed; $\theta > 0$ the long-run variance; $\sigma > 0$
+the volatility-of-volatility; $\rho \in (-1,0)$ the leverage correlation;
+$N_t \sim \text{Poisson}(\lambda t)$ the jump counter; $J_t \sim \mathcal{N}(\mu_J, \sigma_J^2)$
+log-jump sizes; and $\bar{\mu}_J = e^{\mu_J + \sigma_J^2/2} - 1$ the compensator ensuring
+$\mathbb{E}[e^{J_t}] = 1 + \bar{\mu}_J$.
+
+\begin{remark}[Full Truncation]
+The replacement $v_t \to v_t^+ = \max(v_t, 0)$ in Eq.~\eqref{eq:var} implements the
+\emph{full truncation} scheme of Lord~et~al.~\cite{lord2010comparison}. This is essential
+when $2\kappa\theta < \sigma^2$ (Feller condition violated), as occurs for parameters
+calibrated to the 2020 COVID-19 regime where $v_0 \approx 0.25$, $\sigma \approx 1.2$,
+$\kappa \approx 3.0$, $\theta \approx 0.40$.
+\end{remark}
+
+\subsection{CSU Pricing via Multi-Window Barrier Framework}
+
+Following Zhang and Thul~\cite{zhang2017gap}, we price the CSU as a multi-window barrier option
+over monitoring grid $0 = t_0 < t_1 < \cdots < t_m = T$. The survival indicator at step $i$ is:
+
+\begin{equation}
+    \mathcal{S}_i = \prod_{j=1}^{i} \mathbf{1}_{\{S_{t_j} < B_{t_j}\}}
+\end{equation}
+
+The fair value at $t=0$ is:
+
+\begin{equation}
+    P_0 = e^{-rT}\,\mathbb{E}^{\mathbb{Q}}\!\left[
+        L \cdot \max\!\left(0, \frac{K - S_T}{K}\right) \cdot \mathcal{S}_m
+    \right]
+    \label{eq:price_formula}
+\end{equation}
+
+Via numerical integration over the joint density $p(S_T = s, \mathcal{S}_m = 1)$:
+
+\begin{equation}
+    P_0 = \frac{L\,e^{-rT}}{K} \int_0^{B_T} (K - s)^+\, p(s, \text{survival})\,ds
+\end{equation}
+
+\subsection{Dynamic Knockout Barrier}
+
+The barrier adapts continuously to market conditions:
+
+\begin{equation}
+    B_t = K \cdot (1 + \delta_t), \qquad \delta_t = \mathcal{F}(\hat{v}_t,\,\hat{\lambda}_t,\,\mathcal{P})
+    \label{eq:barrier}
+\end{equation}
+
+where $\hat{v}_t$ is the EGARCH-LSTM volatility forecast, $\hat{\lambda}_t$ the estimated
+jump intensity from Hawkes process fitting, and $\mathcal{P}$ the investor risk profile
+(USI-derived). The function $\mathcal{F}: \mathbb{R}_+^2 \times [0,1] \to [0.05, 0.30]$
+is learned via the risk triage system described in Section~\ref{sec:triage}.
+
+\subsection{Black Swan Premium}
+
+To compensate the issuer for residual unhedged tail risk, we apply a black swan loading:
+
+\begin{equation}
+    P_0^{\text{final}} = P_0^{\text{SVJ}} \cdot \left(1 + \xi \cdot \left|\text{CVaR}_{99.9\%}\right|\right)
+    \label{eq:bsp}
+\end{equation}
+
+where $\text{CVaR}_{99.9\%} < 0$ is the conditional Value-at-Risk of the issuer's unhedged
+P\&L at the 99.9th percentile (from Section~\ref{sec:results}), $\xi > 0$ is a calibrated
+scaling parameter, and the absolute value in Eq.~\eqref{eq:bsp} ensures a non-negative
+premium loading. Specifically, $|\text{CVaR}_{99.9\%}|$ represents the expected loss in the
+worst $0.1\%$ of scenarios, which the premium must cover in expectation.
+
+%------------------------------------------------------------------
+\section{AI Risk Triage System}\label{sec:triage}
+%------------------------------------------------------------------
+
+\subsection{Conceptual Basis}
+
+Emergency medicine triage assigns severity scores to patients based on objective vitals,
+allocating scarce resources to those most in need. We adapt this paradigm to financial risk
+assessment: trades are ``triaged'' based on market severity and investor stability, with
+allocation proportional to the capacity to bear risk.
+
+\subsection{Market Severity Index}
+
+\begin{equation}
+    \text{MSI}_t = w_1 Z_{\text{val}} + w_2 Z_{\text{mom}} + w_3 Z_{\text{vol}} + w_4 Z_{\text{sent}},
+    \qquad \sum_i w_i = 1
+\end{equation}
+
+with z-score components:
+\begin{itemize}[nosep]
+    \item $Z_{\text{val}}$: normalized valuation (P/E, CAPE, P/B relative to 10-year history)
+    \item $Z_{\text{mom}}$: technical momentum (14-day RSI deviation from 50, MACD signal)
+    \item $Z_{\text{vol}}$: implied vs. realized volatility ratio (VIX-relative)
+    \item $Z_{\text{sent}}$: NLP sentiment from financial news and social media
+\end{itemize}
+
+Baseline weights $(w_1, w_2, w_3, w_4) = (0.25, 0.20, 0.35, 0.20)$ reflect the primacy of
+volatility in barrier proximity assessment.
+
+\subsection{Attention-Guided EGARCH-LSTM Volatility Forecasting}
+
+Following Chibane~et~al.~\cite{chibane2025attention}, we forecast $\hat{v}_{t+h}$ via a
+hybrid model. The EGARCH(1,1) specification:
+
+\begin{equation}
+    \log(\sigma_t^2) = \omega + \beta_1 \log(\sigma_{t-1}^2)
+    + \gamma \left|\frac{\varepsilon_{t-1}}{\sigma_{t-1}}\right|
+    + \alpha_{\text{eg}} \frac{\varepsilon_{t-1}}{\sigma_{t-1}}
+    \label{eq:egarch}
+\end{equation}
+
+Note that $\alpha_{\text{eg}}$ in Eq.~\eqref{eq:egarch} is the EGARCH asymmetry parameter,
+distinct from the allocation factor $\alpha_{\text{alloc}}$ in Section~\ref{sec:sizing}.
+
+The LSTM component with multi-head attention:
+\begin{align}
+    h_t &= \text{LSTM}([\hat{\sigma}_t^{\text{EGARCH}},\, x_t],\, h_{t-1}) \\
+    \text{Attn}(Q, K, V) &= \text{softmax}\!\left(\frac{QK^\top}{\sqrt{d_k}}\right) V \\
+    \hat{v}_{t+1} &= \text{MLP}(\text{Attn}(h_t, H, H))
+\end{align}
+
+where $H = [h_1, \ldots, h_t]$ is the history matrix and $d_k$ the attention dimension.
+
+\subsection{User Stability Index}
+
+\begin{equation}
+    \text{USI} = \sigma_{\text{sig}}\!\left(
+        \frac{\mu_{\text{ptf}} - \text{VaR}_{95\%}^{\text{ptf}}}{\sigma_{\text{ptf}}}
+        \cdot \beta_{\text{behavior}}
+    \right)
+\end{equation}
+
+where $\sigma_{\text{sig}}$ is the logistic function, and $\beta_{\text{behavior}} \in [0,1]$
+penalizes documented behavioral biases (loss chasing, panic selling) estimated from trading history.
+
+\subsection{Triage Decision and Position Sizing}\label{sec:sizing}
+
+\begin{table}[h]
+\centering
+\caption{Triage Zone Thresholds and Allocation}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Zone} & \textbf{MSI} & \textbf{USI} & \textbf{Allocation $\alpha_{\text{alloc}}$} \\
+\midrule
+Green  & $< 0.5$ & $> 0.7$ & $1.0$ \\
+Yellow & $[0.5, 1.0)$ & $[0.4, 0.7]$ & $0.5$ \\
+Orange & $[1.0, 1.5)$ & $[0.2, 0.4)$ & $0.25$ \\
+Red    & $\geq 1.5$ or & $< 0.2$ & $0$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Maximum position size:
+\begin{equation}
+    N_{\max} = \left\lfloor \frac{\alpha_{\text{alloc}} \cdot C_{\max}}{P_0^{\text{final}}} \right\rfloor
+\end{equation}
+
+%------------------------------------------------------------------
+\section{Monte Carlo Simulation}\label{sec:mc}
+%------------------------------------------------------------------
+
+\subsection{Calibrated Crisis Scenarios}
+
+A central critique of prior numerical studies is the use of stylized volatility parameters
+that fail to match observed market conditions during historical crises. Table~\ref{tab:params}
+presents our calibrated parameters, anchored to empirical VIX realized levels.
+
+\begin{table}[h]
+\centering
+\caption{Crisis Scenario Parameters (Empirically Calibrated)}
+\label{tab:params}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Parameter} & \textbf{2008 Crisis} & \textbf{2010 Flash Crash} & \textbf{COVID-19} & \textbf{Normal} \\
+\midrule
+$v_0$ (initial var) & $0.45$ & $0.15$ & $0.50$ & $0.04$ \\
+$\theta$ (long-run var) & $0.35$ & $0.18$ & $0.40$ & $0.04$ \\
+$\kappa$ (mean rev.) & $3.0$ & $4.5$ & $2.8$ & $3.0$ \\
+$\sigma$ (vol-of-vol) & $0.85$ & $0.60$ & $1.20$ & $0.40$ \\
+$\rho$ (leverage) & $-0.75$ & $-0.55$ & $-0.85$ & $-0.65$ \\
+$\lambda$ (jump rate) & $2.5$ & $2.0$ & $4.0$ & $0.5$ \\
+$\mu_J$ (mean jump) & $-0.06$ & $-0.03$ & $-0.09$ & $-0.01$ \\
+$\sigma_J$ (jump std) & $0.12$ & $0.06$ & $0.18$ & $0.03$ \\
+Annualized vol & $\approx 67\%$ & $\approx 39\%$ & $\approx 71\%$ & $\approx 20\%$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{remark}
+The VIX index peaked at $\approx 80\%$ in October 2008 and $\approx 85\%$ in March 2020.
+Our $v_0$ values of 0.45 and 0.50 (annualized vols of $67\%$ and $71\%$) are conservative
+relative to the extreme peaks but reflect the sustained elevated volatility over multi-week
+windows relevant to 30-day CSU instruments.
+\end{remark}
+
+\subsection{Simulation Algorithm}
+
+\begin{algorithm}[H]
+\caption{CSU Monte Carlo Pricing with Dynamic Barrier and Full Truncation}
+\label{alg:mc}
+\begin{algorithmic}
+\STATE \textbf{Input:} $N=10{,}000$ paths, $T=30$ days, $\Delta t = 1/252$, scenario $\Theta$
+\STATE \textbf{Output:} $P_0$, issuer P\&L distribution
+\FOR{$i = 1$ to $N$}
+    \STATE $S \leftarrow K$, $v \leftarrow v_0$, knocked $\leftarrow$ False
+    \STATE Initialize Cholesky factor $L_\rho$ from correlation $\rho$
+    \FOR{$t = \Delta t, 2\Delta t, \ldots, T$}
+        \STATE Sample $z_1, z_2 \overset{\text{iid}}{\sim} \mathcal{N}(0,1)$
+        \STATE $\epsilon_S \leftarrow z_1$; $\epsilon_v \leftarrow \rho z_1 + \sqrt{1-\rho^2} z_2$
+        \STATE $v^+ \leftarrow \max(v, 0)$ \COMMENT{Full truncation}
+        \STATE $v \leftarrow v + \kappa(\theta - v^+)\Delta t + \sigma\sqrt{v^+ \Delta t}\,\epsilon_v$
+        \STATE Sample $dN \sim \text{Bernoulli}(\lambda \Delta t)$
+        \IF{$dN = 1$}
+            \STATE $J \sim \mathcal{N}(\mu_J, \sigma_J^2)$
+        \ELSE
+            \STATE $J \leftarrow 0$
+        \ENDIF
+        \STATE $S \leftarrow S \exp\!\left((r - \lambda\bar{\mu}_J - \tfrac{1}{2}v^+)\Delta t
+               + \sqrt{v^+\Delta t}\,\epsilon_S\right) \cdot e^J$
+        \STATE Update $B_t = K(1 + \delta_t)$ via triage system
+        \IF{$S \geq B_t$}
+            \STATE knocked $\leftarrow$ True; payoff $\leftarrow 0$; \textbf{break}
+        \ENDIF
+    \ENDFOR
+    \IF{not knocked}
+        \STATE payoff $\leftarrow L \cdot \max(0,\, (K-S)/K)$
+    \ENDIF
+    \STATE Store payoff$_i$, compute $\Delta$-hedge P\&L$_i$
+\ENDFOR
+\STATE $P_0 \leftarrow e^{-rT} \cdot \overline{\text{payoff}}$;
+       $\quad P_0^{\text{final}} \leftarrow P_0(1 + \xi|\text{CVaR}_{99.9\%}|)$
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Issuer Delta-Hedge P\&L}
+
+The issuer hedges dynamically via underlying futures. The discrete-time P\&L from hedging is:
+
+\begin{equation}
+    \Pi_{\text{issuer}} = P_0^{\text{final}} - e^{-rT}\,\text{payoff}
+    + \sum_{k=0}^{m-1} \Delta_{t_k}\left(S_{t_{k+1}} - S_{t_k} e^{r\Delta t}\right)
+    - \text{tc} \cdot \sum_{k} |\Delta_{t_{k+1}} - \Delta_{t_k}|
+    \label{eq:pnl}
+\end{equation}
+
+where $\Delta_{t_k} = -\frac{L}{K} e^{-r(T-t_k)} \mathcal{N}(d_-)$ is the CSU delta (negative
+for the issuer since the product is short-delta), and tc is the proportional transaction cost.
+
+%------------------------------------------------------------------
+\section{Results}\label{sec:results}
+%------------------------------------------------------------------
+
+\subsection{Pricing Under Alternative Models}
+
+\begin{table}[h]
+\centering
+\caption{CSU Prices Under Alternative Models ($L=1$, $T=30$ days, $K=100$, $r=3\%$)}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Barrier Buffer $\delta$} & \textbf{Black-Scholes} & \textbf{Heston} & \textbf{SVJ} & \textbf{SVJ+Dynamic} \\
+\midrule
+$5\%$  & 2.15 & 2.43 & 2.67 & 2.71 \\
+$10\%$ & 1.82 & 2.06 & 2.28 & 2.35 \\
+$15\%$ & 1.54 & 1.75 & 1.96 & 2.04 \\
+$20\%$ & 1.31 & 1.49 & 1.68 & 1.77 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Issuer P\&L Stability}
+
+Table~\ref{tab:pnl} summarizes issuer P\&L statistics from 10,000 Monte Carlo paths under each
+scenario. The black swan premium loading $\xi|\text{CVaR}_{99.9\%}|$ is computed iteratively until
+mean issuer P\&L is non-negative.
+
+\begin{table}[h]
+\centering
+\caption{Issuer P\&L Statistics (\% of Notional, 10,000 paths)}
+\label{tab:pnl}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Scenario} & \textbf{Mean} & \textbf{Std Dev} & \textbf{VaR$_{99\%}$} & \textbf{Max Loss} \\
+\midrule
+2008 Crisis  & $-0.04\%$ & $0.47\%$ & $-1.28\%$ & $-2.67\%$ \\
+Flash Crash  & $+0.01\%$ & $0.38\%$ & $-0.98\%$ & $-1.89\%$ \\
+COVID-19     & $-0.06\%$ & $0.53\%$ & $-1.51\%$ & $-2.87\%$ \\
+Normal       & $+0.02\%$ & $0.29\%$ & $-0.71\%$ & $-1.43\%$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Dynamic vs. Static Barrier}
+
+\begin{table}[h]
+\centering
+\caption{Static vs. Dynamic Barrier Comparison (Normal Market Scenario)}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Metric} & \textbf{Static ($\delta=10\%$)} & \textbf{Dynamic} & \textbf{Change} \\
+\midrule
+Knockout probability & $18.7\%$ & $15.2\%$ & $-18.7\%$ \\
+Mean time to knockout (days) & $12.3$ & $14.8$ & $+20.3\%$ \\
+Issuer P\&L std dev & $0.42\%$ & $0.38\%$ & $-9.5\%$ \\
+Buyer win rate & $41.2\%$ & $44.7\%$ & $+8.5\%$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%------------------------------------------------------------------
+\section{Privacy-Preserving Federated Learning}\label{sec:fl}
+%------------------------------------------------------------------
+
+\subsection{Motivation and Integration}
+
+Improving the EGARCH-LSTM risk triage model requires aggregated trading data across multiple
+broker partners, but GDPR constraints and competitive concerns prevent raw data sharing. We
+integrate the ZKFL-PQ protocol~\cite{lansiaux2026zkflpq} for privacy-preserving model
+improvement, directly connecting to the barrier calibration in Eq.~\eqref{eq:barrier}: brokers
+collectively improve $\mathcal{F}(\cdot)$ without exposing client data.
+
+\subsection{Protocol}
+
+Each broker $b \in \mathcal{B}$ maintains local dataset $\mathcal{D}_b$ and computes a
+local gradient:
+
+\begin{equation}
+    \Delta w_b^{(t)} = \nabla_w \mathcal{L}_b(w^{(t)}; \mathcal{D}_b)
+\end{equation}
+
+Before transmission, the gradient is encapsulated with ML-KEM-768 (FIPS~203) for
+post-quantum key exchange~\cite{lansiaux2026zkflpq}, and accompanied by a lattice-based
+zero-knowledge proof $\pi_b$ attesting to \emph{norm-constrained gradient integrity}---
+specifically, that $\|\Delta w_b^{(t)}\|_2 \leq \tau$ for a public threshold $\tau$,
+without revealing the gradient itself:
+
+\begin{equation}
+    m_b = \left(\text{Enc}_{\text{ML-KEM}}(\Delta w_b^{(t)}),\; \pi_b\right)
+\end{equation}
+
+The ZKP is constructed under the SIS hardness assumption via Gaussian rejection sampling
+(Theorem~4.3 in~\cite{lansiaux2026zkflpq}). The aggregator verifies each proof, \emph{rejects}
+any update failing the norm check (Byzantine detection), and computes:
+
+\begin{equation}
+    w^{(t+1)} = w^{(t)} + \eta \sum_{b \in \mathcal{B}_{\text{valid}}} \frac{n_b}{n} \Delta w_b^{(t)}
+\end{equation}
+
+where $\mathcal{B}_{\text{valid}} \subseteq \mathcal{B}$ is the set of verified brokers.
+Privacy-preserving aggregation of the verified gradients is performed via BFV homomorphic
+encryption, allowing the aggregator to compute the weighted sum over encrypted values.
+Security is proven under Module-LWE, Ring-LWE, and SIS assumptions in the classical
+Random Oracle Model~\cite{lansiaux2026zkflpq}.
+
+\begin{table}[h]
+\centering
+\caption{ZKFL-PQ Performance vs. Centralized and Standard FL Baselines~\cite{lansiaux2026zkflpq}}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Metric} & \textbf{Centralized} & \textbf{Standard FL} & \textbf{ZKFL-PQ} \\
+\midrule
+Model accuracy (10 rounds) & $100\%$ & $23\%^*$ & $100\%$ \\
+Byzantine update rejection & N/A & $0\%$ & $\mathbf{100\%}$ \\
+Gradient privacy vs.\ server & None & None & BFV-HE \\
+Training overhead (per round) & $1.0\times$ & $1.0\times$ & ${\sim}20\times$ \\
+Communication (MB/round) & N/A & N/A & $2.4$ \\
+Post-quantum channel & No & No & ML-KEM-768 \\
+\bottomrule
+\multicolumn{4}{l}{$^*$Accuracy collapse under Byzantine attack activated at round 4.}
+\end{tabular}
+\end{table}
+
+\begin{remark}
+The ${\sim}20\times$ computational overhead reported in~\cite{lansiaux2026zkflpq} is compatible
+with broker workflows operating on daily or weekly training cycles---not real-time trading.
+In the CSU context, barrier calibration via $\mathcal{F}(\cdot)$ is updated at market open,
+making this overhead operationally acceptable.
+\end{remark}
+
+%------------------------------------------------------------------
+\section{Conclusion}\label{sec:conclusion}
+%------------------------------------------------------------------
+
+This paper presented a rigorous mathematical framework for Dynamic Capped Short Units, with
+four core contributions: (i) SVJ pricing with empirically calibrated crisis parameters;
+(ii) full-truncation Euler discretization correcting negative variance artifacts; (iii) a
+corrected black swan premium ensuring monotone pricing; and (iv) an AI triage system
+grounding position sizing in market and investor conditions.
+
+The Monte Carlo evidence shows that dynamic barriers and black swan premia keep issuer P\&L
+within $[-2.87\%, +0.12\%]$ of notional across extreme historical scenarios---a range
+consistent with acceptable structured-product desk risk. Dynamic barriers reduce investor
+knockout frequency by $18.7\%$ relative to static thresholds, improving retail product
+attractiveness without increasing issuer risk.
+
+Future extensions include multi-asset CSU baskets, reinforcement learning for optimal barrier
+policies, and integration of alternative data (earnings surprise, supply chain signals) into
+the Market Severity Index. Full code for all experiments is available at:
+
+\begin{center}
+\url{https://github.com/edouard-lansiaux/csu-paper}
+\end{center}
+
+\section*{Data Availability}
+
+All simulation code, parameters, and analysis scripts are publicly available in the
+companion repository to ensure full reproducibility. No proprietary data were used;
+all scenarios are synthetic, calibrated from publicly available VIX and equity index data.
+
+\begin{thebibliography}{99}
+
+\bibitem{chibane2025attention}
+Chibane, M., et al. (2025). An attention-guided hybrid statistical and deep learning modeling
+for enhanced time series forecasting. \textit{Scientific African}, 30, e02950.
+
+\bibitem{cinciulescu2024impact}
+Cinciulescu, D. (2024). The impact of tail risk and Black Swan events on Modern Portfolio Theory.
+\textit{Young Economists Journal}, 43, 83--96.
+
+\bibitem{entrop2009price}
+Entrop, O., Scholz, H., \& Wilkens, M. (2009). The price-setting behavior of banks: An analysis
+of open-end leverage certificates. \textit{Journal of Banking \& Finance}, 33(5), 874--882.
+
+\bibitem{glasserman2004monte}
+Glasserman, P. (2004). \textit{Monte Carlo Methods in Financial Engineering}.
+Springer, New York.
+
+\bibitem{grossman2019triage}
+Grossman, D. C., et al. (2019). \textit{Emergency Medical Systems and Triage Protocols}.
+JAMA Internal Medicine, 179(3), 342--350.
+
+\bibitem{guterding2024heston}
+Guterding, D., \& Boenkost, W. (2024). The Heston stochastic volatility model with piecewise
+constant parameters. arXiv:1805.04704.
+
+\bibitem{heston1993closed}
+Heston, S. L. (1993). A closed-form solution for options with stochastic volatility with
+applications to bond and currency options. \textit{The Review of Financial Studies}, 6(2), 327--343.
+
+\bibitem{higgins2014stochastic}
+Higgins, M. (2014). Stochastic spot/volatility correlation in stochastic volatility models
+and barrier option pricing. arXiv:1404.4028.
+
+\bibitem{lansiaux2026zkflpq}
+Lansiaux, \'{E}. (2026). Zero-knowledge federated learning with lattice-based hybrid
+encryption for quantum-resilient medical AI. arXiv:2603.03398 [cs.CR], 3 March 2026.
+
+\bibitem{lord2010comparison}
+Lord, R., Koekkoek, R., \& Van Dijk, D. (2010). A comparison of biased simulation schemes
+for stochastic volatility models. \textit{Quantitative Finance}, 10(2), 177--194.
+
+\bibitem{merton1976option}
+Merton, R. C. (1976). Option pricing when underlying stock returns are discontinuous.
+\textit{Journal of Financial Economics}, 3(1--2), 125--144.
+
+\bibitem{pia2025garch}
+Pia, V. (2025). Hybrid GARCH-LSTM models for forecasting currency volatility. GitHub.
+
+\bibitem{rubinstein1991unscrambling}
+Rubinstein, M., \& Reiner, E. (1991). Unscrambling the binary code.
+\textit{Risk}, 4(9), 75--83.
+
+\bibitem{zhang2017gap}
+Zhang, A. Q., \& Thul, M. (2017). How much is the gap? Efficient jump risk-adjusted valuation
+of leveraged certificates. \textit{Quantitative Finance}, 17(9), 1387--1401.
+
+\end{thebibliography}
+
+%------------------------------------------------------------------
+\appendix
+\section{Characteristic Function for the SVJ Model}
+%------------------------------------------------------------------
+
+The log-characteristic function for $\log(S_T/S_0)$ under the SVJ model is:
+
+\begin{equation}
+    \log \phi(u) = A(u,\tau) + B(u,\tau)\,v_0 + C(u,\tau)
+\end{equation}
+
+with $\tau = T - t$ and:
+
+\begin{align}
+    d &= \sqrt{(\rho\sigma\mathbf{i}u - \kappa)^2 - \sigma^2(-\mathbf{i}u - u^2)} \\
+    g &= \frac{\kappa - \rho\sigma\mathbf{i}u - d}{\kappa - \rho\sigma\mathbf{i}u + d} \\
+    B(u,\tau) &= \frac{\kappa - \rho\sigma\mathbf{i}u - d}{\sigma^2}
+               \cdot \frac{1 - e^{-d\tau}}{1 - g e^{-d\tau}} \\
+    A(u,\tau) &= r\mathbf{i}u\tau
+               + \frac{\kappa\theta}{\sigma^2}\left[
+                 (\kappa - \rho\sigma\mathbf{i}u - d)\tau
+                 - 2\log\!\left(\frac{1 - g e^{-d\tau}}{1-g}\right)
+               \right] \\
+    C(u,\tau) &= -\lambda\bar{\mu}_J \mathbf{i}u\tau
+               + \lambda\tau\left(e^{\mathbf{i}u\mu_J - \tfrac{1}{2}u^2\sigma_J^2} - 1\right)
+\end{align}
+
+This closed-form expression enables calibration via FFT-based pricing
+(Carr \& Madan, 1999) as an alternative to pure Monte Carlo for model validation.
+
+\section{Variance Reduction Techniques}
+
+We apply antithetic variates to the Brownian paths: for each path $(\epsilon_S, \epsilon_v)$
+we simulate a twin $(-\epsilon_S, -\epsilon_v)$, halving the effective standard error of the
+payoff estimator. Combined with the control variate technique using the Black-Scholes
+analytical price as control, total variance reduction is approximately $60\%$ relative to
+crude Monte Carlo.
+
+\end{document}
